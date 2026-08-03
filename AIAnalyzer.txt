@@ -1,0 +1,465 @@
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local HttpService = game:GetService("HttpService")
+local ClipboardService = game:GetService("ClipboardService")
+
+-- ===========================
+--   CONFIGURATION – ENTER YOUR API DETAILS HERE
+-- ===========================
+local API_KEY = "apf_qy6eo7ewp342pprs0ahinpxi"               -- e.g., "sk-..."
+local API_URL = "https://apifreellm.com/api/v1/chat"   -- OpenAI endpoint; change for other providers
+local MODEL = "unlimited 3.5"                      -- AI model name (depends on provider)
+
+-- Prompt that instructs the AI to analyze Roblox Lua code
+local AI_PROMPT_PREFIX = [[
+You are a Roblox Lua scripting expert. Analyze the following script for:
+1. Syntax errors or typos.
+2. Logical mistakes that could cause runtime errors.
+3. Anti‑patterns, security issues, or inefficiencies.
+4. Missing end/loop closures or unbalanced brackets.
+5. Provide line‑by‑line corrections if possible.
+6. Simulate how the script would behave in a Roblox environment (say if it will work or break, and why).
+7. Offer an improved version of the script if applicable.
+
+Respond only with a detailed analysis in plain text, no code fences or markdown.
+Script to analyze:
+]]
+
+-- ===========================
+--   GUI CREATION
+-- ===========================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AIAnalyzer"
+screenGui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 650, 0, 550)
+frame.Position = UDim2.new(0.5, -325, 0.5, -275)
+frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+frame.AnchorPoint = Vector2.new(0.5, 0.5)
+
+-- Title bar with close button
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 35)
+titleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(0, 0, 1, 0)
+title.Position = UDim2.new(0, 10, 0, 0)
+title.Text = "🤖 Script Analyzer & AI Tester"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.BackgroundTransparency = 1
+title.Font = Enum.Font.SourceSansBold
+title.TextSize = 18
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = titleBar
+
+local closeButton = Instance.new("TextButton")
+closeButton.Size = UDim2.new(0, 30, 0, 30)
+closeButton.Position = UDim2.new(1, -35, 0, 2)
+closeButton.Text = "✕"
+closeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+closeButton.TextColor3 = Color3.white
+closeButton.Font = Enum.Font.SourceSansBold
+closeButton.TextSize = 20
+closeButton.BorderSizePixel = 0
+closeButton.Parent = titleBar
+closeButton.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+-- Input area
+local inputLabel = Instance.new("TextLabel")
+inputLabel.Size = UDim2.new(1, -20, 0, 20)
+inputLabel.Position = UDim2.new(0, 10, 0, 45)
+inputLabel.Text = "📄 Paste your script:"
+inputLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+inputLabel.BackgroundTransparency = 1
+inputLabel.Font = Enum.Font.SourceSans
+inputLabel.TextSize = 14
+inputLabel.TextXAlignment = Enum.TextXAlignment.Left
+inputLabel.Parent = frame
+
+local inputBox = Instance.new("TextBox")
+inputBox.Size = UDim2.new(1, -20, 0, 180)
+inputBox.Position = UDim2.new(0, 10, 0, 70)
+inputBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+inputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+inputBox.BorderColor3 = Color3.fromRGB(100, 100, 120)
+inputBox.TextXAlignment = Enum.TextXAlignment.Left
+inputBox.TextYAlignment = Enum.TextYAlignment.Top
+inputBox.ClearTextOnFocus = false
+inputBox.MultiLine = true
+inputBox.Font = Enum.Font.Code
+inputBox.TextSize = 14
+inputBox.Text = "-- Paste your script here"
+inputBox.Parent = frame
+
+-- Buttons row
+local analyzeLocalButton = Instance.new("TextButton")
+analyzeLocalButton.Size = UDim2.new(0, 130, 0, 30)
+analyzeLocalButton.Position = UDim2.new(0, 10, 0, 260)
+analyzeLocalButton.Text = "🔍 Local Analysis"
+analyzeLocalButton.BackgroundColor3 = Color3.fromRGB(0, 150, 100)
+analyzeLocalButton.TextColor3 = Color3.white
+analyzeLocalButton.Font = Enum.Font.SourceSansBold
+analyzeLocalButton.TextSize = 14
+analyzeLocalButton.BorderSizePixel = 0
+analyzeLocalButton.Parent = frame
+
+local analyzeAIButton = Instance.new("TextButton")
+analyzeAIButton.Size = UDim2.new(0, 130, 0, 30)
+analyzeAIButton.Position = UDim2.new(0, 150, 0, 260)
+analyzeAIButton.Text = "🤖 AI Analysis"
+analyzeAIButton.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+analyzeAIButton.TextColor3 = Color3.white
+analyzeAIButton.Font = Enum.Font.SourceSansBold
+analyzeAIButton.TextSize = 14
+analyzeAIButton.BorderSizePixel = 0
+analyzeAIButton.Parent = frame
+
+local runTestButton = Instance.new("TextButton")
+runTestButton.Size = UDim2.new(0, 130, 0, 30)
+runTestButton.Position = UDim2.new(0, 290, 0, 260)
+runTestButton.Text = "⚡ Runtime Test"
+runTestButton.BackgroundColor3 = Color3.fromRGB(180, 100, 0)
+runTestButton.TextColor3 = Color3.white
+runTestButton.Font = Enum.Font.SourceSansBold
+runTestButton.TextSize = 14
+runTestButton.BorderSizePixel = 0
+runTestButton.Parent = frame
+
+-- Copy output button
+local copyButton = Instance.new("TextButton")
+copyButton.Size = UDim2.new(0, 100, 0, 30)
+copyButton.Position = UDim2.new(1, -110, 0, 260)
+copyButton.Text = "📋 Copy Output"
+copyButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+copyButton.TextColor3 = Color3.white
+copyButton.Font = Enum.Font.SourceSansBold
+copyButton.TextSize = 14
+copyButton.BorderSizePixel = 0
+copyButton.Parent = frame
+
+-- Output area
+local outputLabel = Instance.new("TextLabel")
+outputLabel.Size = UDim2.new(1, -20, 0, 20)
+outputLabel.Position = UDim2.new(0, 10, 0, 300)
+outputLabel.Text = "📊 Analysis results:"
+outputLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+outputLabel.BackgroundTransparency = 1
+outputLabel.Font = Enum.Font.SourceSans
+outputLabel.TextSize = 14
+outputLabel.TextXAlignment = Enum.TextXAlignment.Left
+outputLabel.Parent = frame
+
+local outputBox = Instance.new("TextBox")
+outputBox.Size = UDim2.new(1, -20, 0, 230)
+outputBox.Position = UDim2.new(0, 10, 0, 325)
+outputBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+outputBox.TextColor3 = Color3.fromRGB(220, 220, 220)
+outputBox.BorderColor3 = Color3.fromRGB(100, 100, 120)
+outputBox.TextXAlignment = Enum.TextXAlignment.Left
+outputBox.TextYAlignment = Enum.TextYAlignment.Top
+outputBox.ClearTextOnFocus = false
+outputBox.MultiLine = true
+outputBox.TextEditable = false -- read-only but copyable
+outputBox.Font = Enum.Font.Code
+outputBox.TextSize = 13
+outputBox.Text = "Results will appear here..."
+outputBox.Parent = frame
+
+-- Loading indicator
+local loadingLabel = Instance.new("TextLabel")
+loadingLabel.Size = UDim2.new(0, 200, 0, 30)
+loadingLabel.Position = UDim2.new(0.5, -100, 0, 300)
+loadingLabel.Text = "⏳ Waiting for AI..."
+loadingLabel.TextColor3 = Color3.fromRGB(255, 200, 50)
+loadingLabel.BackgroundTransparency = 1
+loadingLabel.Font = Enum.Font.SourceSansBold
+loadingLabel.TextSize = 16
+loadingLabel.Visible = false
+loadingLabel.Parent = frame
+
+-- ===========================
+--   HELPER FUNCTIONS
+-- ===========================
+local function countMatches(str, pattern)
+	local count = 0
+	string.gsub(str, pattern, function() count = count + 1 end)
+	return count
+end
+
+-- Basic bracket/control flow balance checker
+local function checkBalances(code)
+	local lines = code:split("\n")
+	local functionLine, ifLine, whileLine, forLine, doLine, endCount = 0,0,0,0,0,0
+	local issues = {}
+	
+	for i, line in ipairs(lines) do
+		local trimmed = line:gsub("%s*%-%-.*", ""):gsub("%s+", "")
+		if trimmed:match("^function%s") then functionLine += 1 end
+		if trimmed:match("^%s*if%s") then ifLine += 1 end
+		if trimmed:match("^%s*while%s") then whileLine += 1 end
+		if trimmed:match("^%s*for%s") then forLine += 1 end
+		if trimmed:match("^%s*do%s*$") or trimmed:match("^%s*do%s") then doLine += 1 end
+		-- crude end detection
+		if line:match("^%s*end%s*$") then endCount += 1 end
+		if line:match("^%s*end[%s%)]") then endCount += 1 end
+	end
+	
+	local totalOpens = functionLine + ifLine + whileLine + forLine + doLine
+	if totalOpens > endCount then
+		table.insert(issues, string.format("⚖️ Unbalanced control structures: %d opens vs %d 'end's. Missing 'end'?", totalOpens, endCount))
+	elseif totalOpens < endCount then
+		table.insert(issues, string.format("⚖️ Too many 'end' statements: %d opens, %d 'end's. Extra 'end'?", totalOpens, endCount))
+	end
+	
+	local openP = countMatches(code, "%(")
+	local closeP = countMatches(code, "%)")
+	if openP ~= closeP then
+		table.insert(issues, string.format("❌ Parentheses imbalance: %d '(' vs %d ')'.", openP, closeP))
+	end
+	
+	local openB = countMatches(code, "%[")
+	local closeB = countMatches(code, "%]")
+	if openB ~= closeB then
+		table.insert(issues, string.format("❌ Bracket imbalance: %d '[' vs %d ']'.", openB, closeB))
+	end
+	
+	local doubleQ = countMatches(code, '"')
+	if doubleQ % 2 ~= 0 then
+		table.insert(issues, "❌ Odd number of double quotes. Missing closing quote?")
+	end
+	local singleQ = countMatches(code, "'")
+	if singleQ % 2 ~= 0 then
+		table.insert(issues, "❌ Odd number of single quotes. Missing closing quote?")
+	end
+	
+	return issues
+end
+
+-- Local syntax and static analysis
+local function localAnalysis(code)
+	local results = {}
+	
+	-- Syntax check
+	local success, err = pcall(function() loadstring(code) end)
+	if not success then
+		table.insert(results, "🔴 SYNTAX ERROR: " .. tostring(err))
+		local line = string.match(err, ":(%d+):")
+		if line then
+			table.insert(results, string.format("  → Error near line %d.", line))
+		end
+	else
+		table.insert(results, "🟢 Syntax check passed.")
+	end
+	
+	-- Balance checks
+	local static = checkBalances(code)
+	if #static > 0 then
+		table.insert(results, "🔍 Structural issues found:")
+		for _, v in ipairs(static) do
+			table.insert(results, "  " .. v)
+		end
+	else
+		table.insert(results, "✅ No obvious bracket/structural imbalances.")
+	end
+	
+	return table.concat(results, "\n")
+end
+
+-- Runtime test in a safe(ish) environment
+local function runtimeTest(code)
+	local output = {}
+	
+	local success, err = pcall(function()
+		local testFunc = loadstring(code)
+		if testFunc then
+			-- Provide a limited environment (not fully sandboxed, but safe enough for testing)
+			local env = setmetatable({
+				print = function(...) table.insert(output, "PRINT: " .. table.concat({...}, "\t")) end,
+				warn = function(...) table.insert(output, "WARN: " .. table.concat({...}, "\t")) end,
+				error = function(...) error(...) end,
+				wait = function(t) if t and t > 5 then error("Timeout") end end,
+			}, { __index = function(t, k)
+				-- Allow access to safe global functions but restrict dangerous ones
+				if k == "Instance" or k == "game" or k == "workspace" then
+					return nil -- block direct access to Roblox objects in test
+				end
+				return getgenv()[k] or _G[k]  -- careful: getgenv() may not exist; use _G
+			end})
+			setfenv(testFunc, env)
+			testFunc()
+		end
+	end)
+	
+	if not success then
+		table.insert(output, 1, "🔴 RUNTIME ERROR: " .. tostring(err))
+		local line = string.match(err, ":(%d+):")
+		if line then
+			table.insert(output, "  → Error near line " .. line)
+		end
+	else
+		table.insert(output, 1, "🟢 Runtime test finished without fatal errors.")
+	end
+	
+	return table.concat(output, "\n")
+end
+
+-- ===========================
+--   AI API INTEGRATION
+-- ===========================
+local function aiAnalysis(code)
+	-- Build request body
+	local requestData = {
+		model = MODEL,
+		messages = {
+			{
+				role = "system",
+				content = "You are a helpful Roblox scripting assistant."
+			},
+			{
+				role = "user",
+				content = AI_PROMPT_PREFIX .. code
+			}
+		},
+		temperature = 0.3,
+		max_tokens = 2000
+	}
+	
+	local requestBody = HttpService:JSONEncode(requestData)
+	
+	local headers = {
+		["Content-Type"] = "application/json",
+		["Authorization"] = "Bearer " .. API_KEY
+	}
+	
+	-- Perform the request (synchronous because we use coroutine.wrap for async feel)
+	local success, response = pcall(function()
+		return HttpService:PostAsync(API_URL, requestBody, Enum.HttpContentType.ApplicationJson, false, headers)
+	end)
+	
+	if not success then
+		return "❌ AI API call failed: " .. tostring(response)
+	end
+	
+	local decoded, decodeError = pcall(function() return HttpService:JSONDecode(response) end)
+	if not decoded then
+		return "❌ Failed to parse AI response: " .. tostring(decodeError)
+	end
+	
+	-- Extract content from typical OpenAI chat completion format
+	if decoded.choices and decoded.choices[1] then
+		local message = decoded.choices[1].message
+		if message and message.content then
+			return "🤖 AI ANALYSIS:\n" .. message.content
+		end
+	end
+	
+	return "❌ Unexpected AI response format."
+end
+
+-- ===========================
+--   BUTTON HANDLERS
+-- ===========================
+local function setOutput(text)
+	outputBox.Text = text
+end
+
+analyzeLocalButton.MouseButton1Click:Connect(function()
+	local code = inputBox.Text
+	if #code == 0 then
+		setOutput("⚠️ Please paste a script first.")
+		return
+	end
+	local result = localAnalysis(code)
+	setOutput(result)
+end)
+
+runTestButton.MouseButton1Click:Connect(function()
+	local code = inputBox.Text
+	if #code == 0 then
+		setOutput("⚠️ Please paste a script first.")
+		return
+	end
+	local result = runtimeTest(code)
+	setOutput(result)
+end)
+
+analyzeAIButton.MouseButton1Click:Connect(function()
+	local code = inputBox.Text
+	if #code == 0 then
+		setOutput("⚠️ Please paste a script first.")
+		return
+	end
+	
+	-- Disable buttons while loading
+	analyzeAIButton.Interactable = false
+	analyzeLocalButton.Interactable = false
+	runTestButton.Interactable = false
+	loadingLabel.Visible = true
+	outputBox.Text = "⏳ Sending code to AI..."
+	
+	-- Run AI analysis in a separate thread to keep UI responsive
+	spawn(function()
+		local result = aiAnalysis(code)
+		setOutput(result)
+		analyzeAIButton.Interactable = true
+		analyzeLocalButton.Interactable = true
+		runTestButton.Interactable = true
+		loadingLabel.Visible = false
+	end)
+end)
+
+copyButton.MouseButton1Click:Connect(function()
+	if #outputBox.Text > 0 then
+		local success, err = pcall(function()
+			ClipboardService:SetClipboard(outputBox.Text)
+		end)
+		if success then
+			outputBox.Text = outputBox.Text .. "\n\n[✅ Output copied to clipboard!]"
+		else
+			outputBox.Text = outputBox.Text .. "\n\n[⚠️ Auto-copy failed. Please select and Ctrl+C manually. Error: " .. tostring(err) .. "]"
+		end
+	end
+end)
+
+-- ===========================
+--   DRAGGABLE FRAME
+-- ===========================
+local dragging = false
+local dragStart
+local startPos
+titleBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPos = frame.Position
+		input.Changed:Wait()
+	end
+end)
+titleBar.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Position - dragStart
+		frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end
+end)
+titleBar.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = false
+	end
+end)
+
+-- Initial welcome message
+setOutput([[
+🤖 Welcome! This tool can:
+  🔍 Local Analysis – checks syntax and bracket balance.
+  ⚡ Runtime Test – runs your script in a sandbox.
+  🤖 AI Analysis – sends your code to an external AI for deep feedback.
+]])
+
+
