@@ -1,0 +1,585 @@
+--[[
+	DebugConsoleClient.client.lua
+	Architecture: Placed in StarterGui to auto‑run on join. Generates a draggable,
+	dark‑mode UI with neon toggles, sliders, and buttons. All state is read from
+	Player Attributes (replicated) on start, kept in sync via a dedicated remote
+	("DebugConsoleSync"). Client‑only features (See Through Walls, Anti‑AFK,
+	Instant Equip) are managed here, respecting server‑side toggle authority.
+--]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local remoteEvent = ReplicatedStorage:WaitForChild("DebugConsoleEvent")
+-- This second remote is created by the server to push state updates to the client
+local syncRemote = ReplicatedStorage:WaitForChild("DebugConsoleSync")
+
+-- State variables mirroring Player Attributes
+local state = {
+	NoFallDamage = false,
+	ClickTeleport = false,
+	AntiRagdoll = false,
+	ToolReach = false,
+	InstantEquip = false,
+	SeeThroughWalls = false,
+	HitboxExpansion = false,
+	HitboxMultiplier = 1.5,
+	CharacterDesync = false,
+	LagSwitch = false,
+	LagSwitchDelay = 0.5,
+	AntiAFK = false,
+}
+
+-- Feature‑specific loops/connections
+local seeThroughWallsActive = false
+local seeThroughWallsParts = {}  -- table of {part, originalTransparency}
+local antiAFKLoop = nil
+local instantEquipConnection = nil
+
+-- ==================== UI Creation ====================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "DebugConsole"
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+-- Main draggable container
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 360, 0, 500)
+mainFrame.Position = UDim2.new(0.7, -180, 0.5, -250)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Parent = screenGui
+
+-- Title bar for dragging
+local titleBar = Instance.new("TextLabel")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+titleBar.Text = "DEV CONSOLE"
+titleBar.TextColor3 = Color3.fromRGB(0, 255, 200)  -- neon accent
+titleBar.Font = Enum.Font.GothamBold
+titleBar.TextSize = 16
+titleBar.Parent = mainFrame
+
+-- Dragging logic
+local dragging = false
+local dragInput
+local dragStart
+local startPos
+
+titleBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPos = mainFrame.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end
+end)
+
+titleBar.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
+		local delta = input.Position - dragStart
+		mainFrame.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end
+end)
+
+-- Scrolling frame for content
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size = UDim2.new(1, -10, 1, -40)
+scrollFrame.Position = UDim2.new(0, 5, 0, 35)
+scrollFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+scrollFrame.BorderSizePixel = 0
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 900)  -- will be resized later
+scrollFrame.ScrollBarThickness = 4
+scrollFrame.Parent = mainFrame
+
+-- UI Helper functions
+local function createToggle(name, yPos)
+	local toggleFrame = Instance.new("Frame")
+	toggleFrame.Size = UDim2.new(1, -20, 0, 40)
+	toggleFrame.Position = UDim2.new(0, 10, 0, yPos)
+	toggleFrame.BackgroundTransparency = 1
+	toggleFrame.Parent = scrollFrame
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(0, 140, 0, 40)
+	label.BackgroundTransparency = 1
+	label.Text = name
+	label.TextColor3 = Color3.fromRGB(200, 200, 200)
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 14
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = toggleFrame
+
+	local switchFrame = Instance.new("Frame")
+	switchFrame.Size = UDim2.new(0, 50, 0, 24)
+	switchFrame.Position = UDim2.new(1, -60, 0.5, -12)
+	switchFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	switchFrame.BorderSizePixel = 0
+	switchFrame.Parent = toggleFrame
+
+	local switchButton = Instance.new("TextButton")
+	switchButton.Size = UDim2.new(0, 24, 0, 24)
+	switchButton.Position = UDim2.new(0, 0, 0, 0)
+	switchButton.BackgroundColor3 = Color3.fromRGB(0, 255, 200)  -- neon on state
+	switchButton.Text = ""
+	switchButton.BorderSizePixel = 0
+	switchButton.Parent = switchFrame
+
+	-- Return references for later state update
+	return {
+		ToggleFrame = toggleFrame,
+		SwitchButton = switchButton,
+		SwitchFrame = switchFrame,
+		On = false
+	}
+end
+
+local function updateToggleVisual(toggleData, on)
+	if on then
+		toggleData.SwitchButton:TweenPosition(
+			UDim2.new(1, -24, 0, 0), "Out", "Quad", 0.1
+		)
+		toggleData.SwitchFrame.BackgroundColor3 = Color3.fromRGB(0, 50, 50)
+	else
+		toggleData.SwitchButton:TweenPosition(
+			UDim2.new(0, 0, 0, 0), "Out", "Quad", 0.1
+		)
+		toggleData.SwitchFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	end
+	toggleData.On = on
+end
+
+-- Connect a toggle to a feature
+local function bindToggle(toggleData, featureName)
+	toggleData.SwitchButton.MouseButton1Click:Connect(function()
+		local newValue = not toggleData.On
+		-- Optimistic UI update
+		updateToggleVisual(toggleData, newValue)
+		-- Send to server
+		remoteEvent:FireServer({
+			Action = "ToggleFeature",
+			Feature = featureName,
+			Value = newValue
+		})
+	end)
+end
+
+-- Create a slider
+local function createSlider(name, min, max, default, yPos, decimalPlaces)
+	decimalPlaces = decimalPlaces or 1
+	local sliderFrame = Instance.new("Frame")
+	sliderFrame.Size = UDim2.new(1, -20, 0, 60)
+	sliderFrame.Position = UDim2.new(0, 10, 0, yPos)
+	sliderFrame.BackgroundTransparency = 1
+	sliderFrame.Parent = scrollFrame
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 0, 20)
+	label.BackgroundTransparency = 1
+	label.Text = name .. ": " .. default
+	label.TextColor3 = Color3.fromRGB(200, 200, 200)
+	label.Font = Enum.Font.Gotham
+	label.TextSize = 13
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = sliderFrame
+
+	local barFrame = Instance.new("Frame")
+	barFrame.Size = UDim2.new(1, 0, 0, 8)
+	barFrame.Position = UDim2.new(0, 0, 0, 30)
+	barFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	barFrame.BorderSizePixel = 0
+	barFrame.Parent = sliderFrame
+
+	local fillFrame = Instance.new("Frame")
+	fillFrame.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+	fillFrame.BackgroundColor3 = Color3.fromRGB(0, 255, 200)
+	fillFrame.BorderSizePixel = 0
+	fillFrame.Parent = barFrame
+
+	local handle = Instance.new("TextButton")
+	handle.Size = UDim2.new(0, 16, 0, 16)
+	handle.Position = UDim2.new((default - min) / (max - min), -8, 0.5, -8)
+	handle.BackgroundColor3 = Color3.fromRGB(0, 255, 200)
+	handle.Text = ""
+	handle.BorderSizePixel = 0
+	handle.Parent = barFrame
+
+	local value = default
+
+	local function setSlider(newValue)
+		value = math.clamp(newValue, min, max)
+		local fraction = (value - min) / (max - min)
+		fillFrame.Size = UDim2.new(fraction, 0, 1, 0)
+		handle.Position = UDim2.new(fraction, -8, 0.5, -8)
+		local displayValue = math.floor(value * (10^decimalPlaces)) / (10^decimalPlaces)
+		label.Text = name .. ": " .. tostring(displayValue)
+	end
+
+	-- Drag handling
+	local dragging = false
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+		end
+	end)
+	handle.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+	barFrame.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			local mousePos = UserInputService:GetMouseLocation()
+			local relX = (mousePos.X - barFrame.AbsolutePosition.X) / barFrame.AbsoluteSize.X
+			setSlider(min + relX * (max - min))
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			local mousePos = input.Position
+			local relX = (mousePos.X - barFrame.AbsolutePosition.X) / barFrame.AbsoluteSize.X
+			setSlider(min + relX * (max - min))
+		end
+	end)
+	-- Ensure drag stops even if mouse released outside
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+
+	return {
+		SetValue = function(newVal) setSlider(newVal) end,
+		GetValue = function() return value end,
+		Frame = sliderFrame,
+	}
+end
+
+-- Create a click‑action button
+local function createButton(name, yPos, callback)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, -20, 0, 35)
+	btn.Position = UDim2.new(0, 10, 0, yPos)
+	btn.BackgroundColor3 = Color3.fromRGB(0, 100, 100)
+	btn.Text = name
+	btn.TextColor3 = Color3.fromRGB(0, 255, 200)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 15
+	btn.BorderSizePixel = 0
+	btn.Parent = scrollFrame
+
+	btn.MouseButton1Click:Connect(callback)
+	return btn
+end
+
+-- Build all UI elements
+local yOffset = 10
+local toggleList = {}
+local featureNames = {
+	"NoFallDamage", "ClickTeleport", "AntiRagdoll", "ToolReach",
+	"InstantEquip", "SeeThroughWalls", "HitboxExpansion",
+	"CharacterDesync", "LagSwitch", "AntiAFK"
+}
+for _, feature in ipairs(featureNames) do
+	local toggle = createToggle(feature, yOffset)
+	toggleList[feature] = toggle
+	bindToggle(toggle, feature)
+	yOffset = yOffset + 45
+end
+
+-- Sliders
+local hitboxMultiplierSlider = createSlider("Hitbox Multiplier", 0.5, 3, state.HitboxMultiplier, yOffset, 2)
+yOffset = yOffset + 70
+
+local lagDelaySlider = createSlider("Lag Delay (s)", 0.1, 2, state.LagSwitchDelay, yOffset, 2)
+yOffset = yOffset + 70
+
+-- Buttons
+createButton("Dupe Tool", yOffset, function()
+	remoteEvent:FireServer({ Action = "ToolDuplicate" })
+end)
+yOffset = yOffset + 45
+
+-- Update canvas size
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, yOffset + 20)
+
+-- ==================== State Synchronisation ====================
+-- Read initial state from Player Attributes
+local function loadStateFromAttributes()
+	for _, feature in ipairs(featureNames) do
+		local val = player:GetAttribute(feature)
+		if type(val) == "boolean" then
+			state[feature] = val
+			if toggleList[feature] then
+				updateToggleVisual(toggleList[feature], val)
+			end
+		end
+	end
+	state.HitboxMultiplier = player:GetAttribute("HitboxMultiplier") or 1.5
+	state.LagSwitchDelay = player:GetAttribute("LagSwitchDelay") or 0.5
+	hitboxMultiplierSlider.SetValue(state.HitboxMultiplier)
+	lagDelaySlider.SetValue(state.LagSwitchDelay)
+end
+loadStateFromAttributes()
+
+-- Listen for sync events from server
+syncRemote.OnClientEvent:Connect(function(feature, value)
+	if type(value) == "boolean" and toggleList[feature] then
+		state[feature] = value
+		updateToggleVisual(toggleList[feature], value)
+		-- Trigger feature start/stop
+		onFeatureChanged(feature, value)
+	elseif feature == "HitboxMultiplier" then
+		state.HitboxMultiplier = value
+		hitboxMultiplierSlider.SetValue(value)
+	elseif feature == "LagSwitchDelay" then
+		state.LagSwitchDelay = value
+		lagDelaySlider.SetValue(value)
+	end
+end)
+
+-- Slider change handlers
+hitboxMultiplierSlider.Frame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function() end)
+-- Use a debounced update
+local lastHitboxUpdate = 0
+local function onHitboxSliderChanged()
+	local newVal = hitboxMultiplierSlider.GetValue()
+	if math.abs(newVal - state.HitboxMultiplier) < 0.01 then return end
+	state.HitboxMultiplier = newVal
+	remoteEvent:FireServer({
+		Action = "SetSlider",
+		Feature = "HitboxMultiplier",
+		Value = newVal
+	})
+end
+
+-- For slider we need to detect drag end; use a variable
+local hitboxDragging = false
+hitboxMultiplierSlider.Frame.DescendantAdded:Connect(function(desc)
+	if desc:IsA("TextButton") then
+		desc.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				hitboxDragging = true
+			end
+		end)
+		desc.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				hitboxDragging = false
+				onHitboxSliderChanged()
+			end
+		end)
+	end
+end)
+
+local lagDragging = false
+lagDelaySlider.Frame.DescendantAdded:Connect(function(desc)
+	if desc:IsA("TextButton") then
+		desc.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				lagDragging = true
+			end
+		end)
+		desc.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				lagDragging = false
+				local newVal = lagDelaySlider.GetValue()
+				if math.abs(newVal - state.LagSwitchDelay) < 0.01 then return end
+				state.LagSwitchDelay = newVal
+				remoteEvent:FireServer({
+					Action = "SetSlider",
+					Feature = "LagSwitchDelay",
+					Value = newVal
+				})
+			end
+		end)
+	end
+end)
+
+-- ==================== Feature Implementations (Client Side) ====================
+
+-- Feature 7: See Through Walls
+local function startSeeThroughWalls()
+	if seeThroughWallsActive then return end
+	seeThroughWallsActive = true
+
+	local function makePartTransparent(part)
+		if part:IsA("BasePart") and not part:IsDescendantOf(workspace.CurrentCamera) then
+			-- Skip player characters (so you can see other players normally)
+			local parentModel = part.Parent
+			if parentModel and parentModel:FindFirstChild("Humanoid") then
+				return
+			end
+			-- Store original transparency and apply
+			if not seeThroughWallsParts[part] then
+				seeThroughWallsParts[part] = part.Transparency
+				part.Transparency = math.max(part.Transparency, 0.5)
+			end
+		end
+	end
+
+	local function revertPartTransparency(part)
+		if seeThroughWallsParts[part] then
+			part.Transparency = seeThroughWallsParts[part]
+			seeThroughWallsParts[part] = nil
+		end
+	end
+
+	-- Apply to all existing parts
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		makePartTransparent(obj)
+	end
+
+	-- Listen for new parts
+	workspace.DescendantAdded:Connect(function(desc)
+		if seeThroughWallsActive then
+			makePartTransparent(desc)
+		end
+	end)
+
+	workspace.DescendantRemoving:Connect(function(desc)
+		if seeThroughWallsParts[desc] then
+			revertPartTransparency(desc)
+		end
+	end)
+end
+
+local function stopSeeThroughWalls()
+	seeThroughWallsActive = false
+	for part, orig in pairs(seeThroughWallsParts) do
+		if part and part.Parent then
+			part.Transparency = orig
+		end
+	end
+	table.clear(seeThroughWallsParts)
+end
+
+-- Feature 11: Anti‑AFK
+local function startAntiAFK()
+	if antiAFKLoop then return end
+	antiAFKLoop = RunService.Heartbeat:Connect(function()
+		-- Using Heartbeat to tick every frame; wait 50s between jumps
+		local lastJump = 0
+		return function(dt) -- not exactly, we need a timed loop; better use a simple loop
+	end
+end)
+-- Simpler: use a coroutine loop
+antiAFKLoop = coroutine.wrap(function()
+	while true do
+		wait(50)
+		if not state.AntiAFK then break end
+		local char = player.Character
+		local humanoid = char and char:FindFirstChild("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			humanoid.Jump = true
+		end
+	end
+end)
+antiAFKLoop()
+end
+
+local function stopAntiAFK()
+	if antiAFKLoop then
+		-- Coroutine will exit when it checks state.AntiAFK on next loop
+		-- We'll set state and the loop breaks naturally.
+		antiAFKLoop = nil
+	end
+end
+
+-- Feature 6: Instant Equip
+local function startInstantEquip()
+	if instantEquipConnection then return end
+	instantEquipConnection = player.CharacterAdded:Connect(function(char)
+		char.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") then
+				-- Fire tool activation as soon as it's equipped, bypassing deploy delay
+				local tool = child
+				tool.Equipped:Connect(function()
+					task.wait(0.05)  -- tiny delay to let the tool fully load
+					pcall(function()
+						tool:Activate()
+					end)
+				end)
+			end
+		end)
+	end)
+	-- Also handle already equipped tools
+	local char = player.Character
+	if char then
+		for _, tool in ipairs(char:GetChildren()) do
+			if tool:IsA("Tool") then
+				pcall(function() tool:Activate() end)
+			end
+		end
+	end
+end
+
+local function stopInstantEquip()
+	if instantEquipConnection then
+		instantEquipConnection:Disconnect()
+		instantEquipConnection = nil
+	end
+end
+
+-- Feature 2: Click to Teleport (mouse detection)
+local teleportConnection
+local function startClickTeleport()
+	if teleportConnection then return end
+	teleportConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			if not state.ClickTeleport then return end
+			local mouse = player:GetMouse()
+			local target = mouse.Hit
+			if target then
+				remoteEvent:FireServer({
+					Action = "ClickTeleport",
+					CFrame = target
+				})
+			end
+		end
+	end)
+end
+
+local function stopClickTeleport()
+	if teleportConnection then
+		teleportConnection:Disconnect()
+		teleportConnection = nil
+	end
+end
+
+-- Feature change handler called after sync
+function onFeatureChanged(feature, value)
+	if feature == "SeeThroughWalls" then
+		if value then startSeeThroughWalls() else stopSeeThroughWalls() end
+	elseif feature == "AntiAFK" then
+		if value then startAntiAFK() else stopAntiAFK() end
+	elseif feature == "InstantEquip" then
+		if value then startInstantEquip() else stopInstantEquip() end
+	elseif feature == "ClickTeleport" then
+		if value then startClickTeleport() else stopClickTeleport() end
+	end
+end
+
+-- Initialise features that were already enabled on join
+for feature, val in pairs(state) do
+	if type(val) == "boolean" and val then
+		onFeatureChanged(feature, true)
+	end
+end
+
+-- Cleanup on character removal / player leaving (optional)
+player.CharacterRemoving:Connect(function()
+	-- Instant equip connection will re‑bind on next character, keep alive.
+end)
