@@ -7,7 +7,7 @@ local ClipboardService = game:GetService("ClipboardService")
 -- ===========================
 --   CONFIGURATION – ENTER YOUR API DETAILS HERE
 -- ===========================
-local API_KEY = "apf_qy6eo7ewp342pprs0ahinpxi"               -- e.g., "sk-..."
+local API_KEY = "."               -- e.g., "sk-..."
 local API_URL = "https://apifreellm.com/api/v1/chat"   -- OpenAI endpoint; change for other providers
 local MODEL = "unlimited 3.5"                      -- AI model name (depends on provider)
 
